@@ -8,12 +8,14 @@
 package org.matomo.sdk;
 
 import android.content.SharedPreferences;
+
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
 import org.matomo.sdk.dispatcher.DispatchMode;
 import org.matomo.sdk.dispatcher.Dispatcher;
 import org.matomo.sdk.dispatcher.Packet;
+import org.matomo.sdk.tools.DeviceHelper;
 import org.matomo.sdk.tools.Objects;
 
 import java.text.SimpleDateFormat;
@@ -100,13 +102,15 @@ public class Tracker {
 
         mDefaultTrackMe.set(QueryParams.SESSION_START, DEFAULT_TRUE_VALUE);
 
+        DeviceHelper deviceHelper = mMatomo.getDeviceHelper();
+
         String resolution = DEFAULT_UNKNOWN_VALUE;
-        int[] res = mMatomo.getDeviceHelper().getResolution();
+        int[] res = deviceHelper.getResolution();
         if (res != null) resolution = String.format("%sx%s", res[0], res[1]);
         mDefaultTrackMe.set(QueryParams.SCREEN_RESOLUTION, resolution);
 
-        mDefaultTrackMe.set(QueryParams.USER_AGENT, mMatomo.getDeviceHelper().getUserAgent());
-        mDefaultTrackMe.set(QueryParams.LANGUAGE, mMatomo.getDeviceHelper().getUserLanguage());
+        mDefaultTrackMe.set(QueryParams.USER_AGENT, deviceHelper.getUserAgent());
+        mDefaultTrackMe.set(QueryParams.LANGUAGE, deviceHelper.getUserLanguage());
         mDefaultTrackMe.set(QueryParams.URL_PATH, config.getApplicationBaseUrl());
     }
 
@@ -375,24 +379,25 @@ public class Tracker {
         long visitCount;
         long previousVisit;
 
+        SharedPreferences prefs = getPreferences();
         // Protected against Trackers on other threads trying to do the same thing.
         // This works because they would use the same preference object.
-        synchronized (getPreferences()) {
+        //noinspection SynchronizationOnLocalVariableOrMethodParameter
+        synchronized (prefs) {
+            SharedPreferences.Editor editor = prefs.edit();
             visitCount = 1 + getPreferences().getLong(PREF_KEY_TRACKER_VISITCOUNT, 0);
-            getPreferences().edit().putLong(PREF_KEY_TRACKER_VISITCOUNT, visitCount).apply();
-        }
+            editor.putLong(PREF_KEY_TRACKER_VISITCOUNT, visitCount);
 
-        synchronized (getPreferences()) {
-            firstVisitTime = getPreferences().getLong(PREF_KEY_TRACKER_FIRSTVISIT, -1);
+            firstVisitTime = prefs.getLong(PREF_KEY_TRACKER_FIRSTVISIT, -1);
             if (firstVisitTime == -1) {
                 firstVisitTime = System.currentTimeMillis() / 1000;
-                getPreferences().edit().putLong(PREF_KEY_TRACKER_FIRSTVISIT, firstVisitTime).apply();
+                editor.putLong(PREF_KEY_TRACKER_FIRSTVISIT, firstVisitTime);
             }
-        }
 
-        synchronized (getPreferences()) {
-            previousVisit = getPreferences().getLong(PREF_KEY_TRACKER_PREVIOUSVISIT, -1);
-            getPreferences().edit().putLong(PREF_KEY_TRACKER_PREVIOUSVISIT, System.currentTimeMillis() / 1000).apply();
+            previousVisit = prefs.getLong(PREF_KEY_TRACKER_PREVIOUSVISIT, -1);
+            editor.putLong(PREF_KEY_TRACKER_PREVIOUSVISIT, System.currentTimeMillis() / 1000);
+
+            editor.apply();
         }
 
         // trySet because the developer could have modded these after creating the Tracker
@@ -405,6 +410,8 @@ public class Tracker {
         trackMe.trySet(QueryParams.FIRST_VISIT_TIMESTAMP, mDefaultTrackMe.get(QueryParams.FIRST_VISIT_TIMESTAMP));
         trackMe.trySet(QueryParams.TOTAL_NUMBER_OF_VISITS, mDefaultTrackMe.get(QueryParams.TOTAL_NUMBER_OF_VISITS));
         trackMe.trySet(QueryParams.PREVIOUS_VISIT_TIMESTAMP, mDefaultTrackMe.get(QueryParams.PREVIOUS_VISIT_TIMESTAMP));
+
+        injectFingerprintParams(trackMe);
     }
 
     /**
@@ -438,17 +445,27 @@ public class Tracker {
         mDefaultTrackMe.set(QueryParams.URL_PATH, urlPath);
         trackMe.set(QueryParams.URL_PATH, urlPath);
 
-        if (mLastEvent == null || !Objects.equals(trackMe.get(QueryParams.USER_ID), mLastEvent.get(QueryParams.USER_ID))) {
+        if (mLastEvent != null && !Objects.equals(trackMe.get(QueryParams.USER_ID), mLastEvent.get(QueryParams.USER_ID))) {
             // https://github.com/matomo-org/matomo-sdk-android/issues/209
-            trackMe.trySet(QueryParams.SCREEN_RESOLUTION, mDefaultTrackMe.get(QueryParams.SCREEN_RESOLUTION));
-            trackMe.trySet(QueryParams.USER_AGENT, mDefaultTrackMe.get(QueryParams.USER_AGENT));
-            trackMe.trySet(QueryParams.LANGUAGE, mDefaultTrackMe.get(QueryParams.LANGUAGE));
+            injectFingerprintParams(trackMe);
         }
+    }
+
+    /**
+     * These parameters are generally only needed as part of the session start (injectInitialParams)
+     * However they are also used for fingerprint to track User ID changes. Therefor they are also
+     * injected as part of injectBaseParam when the USER_ID changes
+     */
+    private void injectFingerprintParams(TrackMe trackMe) {
+        trackMe.trySet(QueryParams.SCREEN_RESOLUTION, mDefaultTrackMe.get(QueryParams.SCREEN_RESOLUTION));
+        trackMe.trySet(QueryParams.USER_AGENT, mDefaultTrackMe.get(QueryParams.USER_AGENT));
+        trackMe.trySet(QueryParams.LANGUAGE, mDefaultTrackMe.get(QueryParams.LANGUAGE));
     }
 
     public Tracker track(TrackMe trackMe) {
         synchronized (mTrackingLock) {
-            final boolean newSession = System.currentTimeMillis() - mSessionStartTime > mSessionTimeout;
+            final boolean newSession = trackMe.has(QueryParams.SESSION_START) ||
+                    System.currentTimeMillis() - mSessionStartTime > mSessionTimeout;
 
             if (newSession) {
                 mSessionStartTime = System.currentTimeMillis();
